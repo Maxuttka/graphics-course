@@ -4,6 +4,7 @@
 #include <etna/GlobalContext.hpp>
 #include <etna/PipelineManager.hpp>
 
+#include <chrono>
 
 App::App()
   : resolution{1280, 720}
@@ -74,7 +75,18 @@ App::App()
     resolution = {w, h};
   }
 
-  // TODO: Initialize any additional resources you require here!
+  etna::create_program(
+    "toy", {LOCAL_SHADERTOY1_SHADERS_ROOT "toy.comp.spv"});
+  toyPipeline =
+    etna::get_context().getPipelineManager().createComputePipeline("toy", {});
+  resultImage = etna::get_context().createImage(etna::Image::CreateInfo{
+    .extent = vk::Extent3D{resolution.x, resolution.y, 1},
+    .name = "local_shadertoy_result",
+    .format = vk::Format::eR8G8B8A8Unorm,
+    .imageUsage =
+      vk::ImageUsageFlagBits::eStorage |
+      vk::ImageUsageFlagBits::eTransferSrc,
+  });
 }
 
 App::~App()
@@ -139,7 +151,101 @@ void App::drawFrame()
       etna::flush_barriers(currentCmdBuf);
 
 
-      // TODO: Record your commands here!
+      const auto toyProgram = etna::get_shader_program("toy");
+      auto descriptorSet = etna::create_descriptor_set(
+        toyProgram.getDescriptorLayoutId(0),
+        currentCmdBuf,
+        {etna::Binding{
+          0,
+          resultImage.genBinding(
+            vk::Sampler{},
+            vk::ImageLayout::eGeneral)}});
+
+      const vk::DescriptorSet vkDescriptorSet =
+        descriptorSet.getVkSet();
+      currentCmdBuf.bindPipeline(
+        vk::PipelineBindPoint::eCompute,
+        toyPipeline.getVkPipeline());
+      currentCmdBuf.bindDescriptorSets(
+        vk::PipelineBindPoint::eCompute,
+        toyPipeline.getVkPipelineLayout(),
+        0,
+        1,
+        &vkDescriptorSet,
+        0,
+        nullptr);
+      static const auto startTime =
+        std::chrono::steady_clock::now();
+
+      const float timeSeconds =
+        std::chrono::duration<float>(
+          std::chrono::steady_clock::now() - startTime)
+          .count();
+      currentCmdBuf.pushConstants(
+        toyPipeline.getVkPipelineLayout(),
+        vk::ShaderStageFlagBits::eCompute,
+        0,
+        sizeof(timeSeconds),
+        &timeSeconds);
+      etna::flush_barriers(currentCmdBuf);
+      constexpr uint32_t LOCAL_SIZE_X = 8;
+      constexpr uint32_t LOCAL_SIZE_Y = 8;
+      currentCmdBuf.dispatch(
+        (resolution.x + LOCAL_SIZE_X - 1) / LOCAL_SIZE_X,
+        (resolution.y + LOCAL_SIZE_Y - 1) / LOCAL_SIZE_Y,
+        1);
+      etna::set_state(
+        currentCmdBuf,
+        resultImage.get(),
+        vk::PipelineStageFlagBits2::eTransfer,
+        vk::AccessFlagBits2::eTransferRead,
+        vk::ImageLayout::eTransferSrcOptimal,
+        vk::ImageAspectFlagBits::eColor);
+
+      etna::flush_barriers(currentCmdBuf);
+      vk::ImageBlit blitRegion{};
+
+      blitRegion.srcSubresource =
+        vk::ImageSubresourceLayers{
+          .aspectMask = vk::ImageAspectFlagBits::eColor,
+          .mipLevel = 0,
+          .baseArrayLayer = 0,
+          .layerCount = 1,
+        };
+
+      blitRegion.srcOffsets[0] =
+        vk::Offset3D{0, 0, 0};
+
+      blitRegion.srcOffsets[1] =
+        vk::Offset3D{
+          static_cast<int32_t>(resolution.x),
+          static_cast<int32_t>(resolution.y),
+          1};
+
+      blitRegion.dstSubresource =
+        vk::ImageSubresourceLayers{
+          .aspectMask = vk::ImageAspectFlagBits::eColor,
+          .mipLevel = 0,
+          .baseArrayLayer = 0,
+          .layerCount = 1,
+        };
+
+      blitRegion.dstOffsets[0] =
+        vk::Offset3D{0, 0, 0};
+
+      blitRegion.dstOffsets[1] =
+        vk::Offset3D{
+          static_cast<int32_t>(resolution.x),
+          static_cast<int32_t>(resolution.y),
+          1};
+      currentCmdBuf.blitImage(
+        resultImage.get(),
+        vk::ImageLayout::eTransferSrcOptimal,
+        backbuffer,
+        vk::ImageLayout::eTransferDstOptimal,
+        1,
+        &blitRegion,
+        vk::Filter::eLinear);
 
 
       // At the end of "rendering", we are required to change how the pixels of the
